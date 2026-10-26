@@ -70,7 +70,6 @@ def _to_text(x) -> str:
 
 
 def avalanche(text, text2=None, position=None) -> dict:
-    print("DEBUG avalanche args:", repr(text), repr(text2), repr(position), flush=True)
     """So sanh so bit khac nhau giua hash(text) va hash(text2).
     text2 de trong/None -> tu tang ky tu tai `position` (mac dinh ky tu cuoi) len 1."""
     text = _to_text(text)
@@ -91,25 +90,33 @@ def avalanche(text, text2=None, position=None) -> dict:
                      "diff_bits": d, "total_bits": info["bits"],
                      "ratio": round(d / info["bits"], 4)}
     main = res["sha256"]
+    b1 = bin(int(main["hash1"], 16))[2:].zfill(256)
+    b2 = bin(int(main["hash2"], 16))[2:].zfill(256)
+    diff_mask = "".join("1" if x != y else "0" for x, y in zip(b1, b2))
     return {"original": text, "modified": text2, "text1": text, "text2": text2,
             "hash1": main["hash1"], "hash2": main["hash2"],
-            "diff_bits": main["diff_bits"], "total_bits": main["total_bits"],
-            "ratio": main["ratio"], "result": res}
+            "h1": main["hash1"], "h2": main["hash2"],
+            "hex1": main["hash1"], "hex2": main["hash2"],
+            "bin1": b1, "bin2": b2, "bits1": b1, "bits2": b2,
+            "diff_mask": diff_mask, "diff_positions": [i for i, c in enumerate(diff_mask) if c == "1"],
+            "diff_bits": main["diff_bits"], "bits_changed": main["diff_bits"],
+            "total_bits": main["total_bits"], "bits": main["total_bits"],
+            "ratio": main["ratio"], "percent": round(main["ratio"] * 100, 2),
+            "result": res}
 
 
-def hmac_sha256(key, message, tag=None) -> dict:
-    """Tinh HMAC-SHA256; neu co `tag` thi kiem tra bang so sanh hang thoi gian."""
-    t = hmac.new(_to_bytes(key), _to_bytes(message), hashlib.sha256).hexdigest()
-    out = {"tag": t}
-    if tag is not None and tag != "":
-        ok = hmac.compare_digest(t.encode(), str(tag).strip().lower().encode())
-        out["verify"] = {"valid": ok,
-                         "message": "The hop le" if ok else
-                         "The khong hop le (sai khoa hoac thong diep bi sua)"}
-    return out
+def hmac_sha256(key, message) -> str:
+    """HMAC-SHA256, tra ve chuoi hex."""
+    return hmac.new(_to_bytes(key), _to_bytes(message), hashlib.sha256).hexdigest()
 
 
-def benchmark(data=None, repeat: int = 20) -> dict:
+def hmac_verify(key, message, tag) -> bool:
+    """So sanh the bang hmac.compare_digest (hang thoi gian)."""
+    expected = hmac_sha256(key, message)
+    return hmac.compare_digest(expected.encode(), str(tag or "").strip().lower().encode())
+
+
+def benchmark_detail(data=None, repeat: int = 20) -> dict:
     """Do thoi gian bam cho tung ham; data=None -> tu sinh 10 MB ngau nhien."""
     data = os.urandom(MIN_BENCH_BYTES) if data is None else _to_bytes(data)
     if len(data) < MIN_BENCH_BYTES:
@@ -128,3 +135,9 @@ def benchmark(data=None, repeat: int = 20) -> dict:
                      "stdev_ms": round(statistics.pstdev(ts), 2),
                      "throughput_mb_s": round(size_mb / (mean / 1000), 1)}
     return {"size_mb": round(size_mb, 2), "repeat": repeat, "result": res}
+
+
+def benchmark(data=None, repeat: int = 20) -> dict:
+    """Dict phang {'sha256': ms, 'sha1': ms, 'md5': ms} (thoi gian trung binh, ms)."""
+    d = benchmark_detail(data, repeat)
+    return {name: v["mean_ms"] for name, v in d["result"].items()}
