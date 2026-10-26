@@ -1,4 +1,3 @@
-```python
 """
 hashing.py - Phan B.2.2: Ham bam, HMAC va hieu ung thac.
 
@@ -463,4 +462,3 @@ if __name__ == "__main__":
     app = Flask(__name__)
     app.register_blueprint(hash_bp)
     app.run(host="127.0.0.1", port=5001, debug=True)
-```
