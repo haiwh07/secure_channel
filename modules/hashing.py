@@ -61,48 +61,24 @@ def hash_data(data) -> dict:
 hash_all = compute_hashes = hash_text = hash_bytes = hash_data
 
 
-def _to_text(x) -> str:
-    if x is None:
-        return ""
-    if isinstance(x, (bytes, bytearray)):
-        return bytes(x).decode("utf-8", "replace")
-    return str(x)
-
-
-def avalanche(text, text2=None, position=None) -> dict:
-    """So sanh so bit khac nhau giua hash(text) va hash(text2).
-    text2 de trong/None -> tu tang ky tu tai `position` (mac dinh ky tu cuoi) len 1."""
-    text = _to_text(text)
-    text2 = _to_text(text2)
-    if not text:
+def avalanche(data_a, data_b) -> dict:
+    """So sanh SHA-256(data_a) voi SHA-256(data_b) (nhan bytes hoac str).
+    Tra ve hash_a, hash_b (hex), diff_bits, total_bits; kem ket qua cho SHA-1 va MD5 trong 'others'.
+    app.py da tu sinh data_b (tang ky tu cuoi len 1) va tu them text_a/text_b."""
+    a, b = _to_bytes(data_a), _to_bytes(data_b)
+    if not a:
         raise ValueError("Hay nhap van ban khong rong.")
-    if not text2:
-        pos = len(text) - 1 if position in (None, "") else int(position)
-        if not 0 <= pos < len(text):
-            raise ValueError("Vi tri ky tu ngoai pham vi.")
-        text2 = flip_one_char(text, pos)
     res = {}
     for name, info in ALGOS.items():
-        h1 = hashlib.new(name, text.encode()).digest()
-        h2 = hashlib.new(name, text2.encode()).digest()
+        h1 = hashlib.new(name, a).digest()
+        h2 = hashlib.new(name, b).digest()
         d = bit_diff(h1, h2)
-        res[name] = {"hash1": h1.hex(), "hash2": h2.hex(),
-                     "diff_bits": d, "total_bits": info["bits"],
-                     "ratio": round(d / info["bits"], 4)}
-    main = res["sha256"]
-    b1 = bin(int(main["hash1"], 16))[2:].zfill(256)
-    b2 = bin(int(main["hash2"], 16))[2:].zfill(256)
-    diff_mask = "".join("1" if x != y else "0" for x, y in zip(b1, b2))
-    return {"original": text, "modified": text2, "text1": text, "text2": text2,
-            "hash1": main["hash1"], "hash2": main["hash2"],
-            "h1": main["hash1"], "h2": main["hash2"],
-            "hex1": main["hash1"], "hex2": main["hash2"],
-            "bin1": b1, "bin2": b2, "bits1": b1, "bits2": b2,
-            "diff_mask": diff_mask, "diff_positions": [i for i, c in enumerate(diff_mask) if c == "1"],
-            "diff_bits": main["diff_bits"], "bits_changed": main["diff_bits"],
-            "total_bits": main["total_bits"], "bits": main["total_bits"],
-            "ratio": main["ratio"], "percent": round(main["ratio"] * 100, 2),
-            "result": res}
+        res[name] = {"hash_a": h1.hex(), "hash_b": h2.hex(), "diff_bits": d,
+                     "total_bits": info["bits"], "ratio": round(d / info["bits"], 4)}
+    m = res["sha256"]
+    return {"hash_a": m["hash_a"], "hash_b": m["hash_b"],
+            "diff_bits": m["diff_bits"], "total_bits": m["total_bits"],
+            "ratio": m["ratio"], "others": {k: v for k, v in res.items() if k != "sha256"}}
 
 
 def hmac_sha256(key, message) -> str:
