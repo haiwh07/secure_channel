@@ -43,31 +43,44 @@ def _to_bytes(x) -> bytes:
 
 # ---------- ham chinh ----------
 def digest_all(data) -> dict:
-    """{'sha256': {hex, bits, warning}, 'sha1': ..., 'md5': ...}"""
+    """{'sha256': 'hex', 'sha1': 'hex', 'md5': 'hex'} - moi thuat toan la mot chuoi hex."""
     data = _to_bytes(data)
-    return {name: {"hex": hashlib.new(name, data).hexdigest(),
-                   "bits": info["bits"], "warning": WARN.get(name)}
-            for name, info in ALGOS.items()}
+    return {name: hashlib.new(name, data).hexdigest() for name in ALGOS}
 
 
 def hash_data(data) -> dict:
-    """Giong POST /api/hash cu."""
+    """Ban chi tiet: do dai + hex/bits/canh bao cho tung thuat toan."""
     data = _to_bytes(data)
-    return {"length_bytes": len(data), "hashes": digest_all(data)}
+    flat = digest_all(data)
+    return {"length_bytes": len(data), **flat,
+            "hashes": {n: {"hex": flat[n], "bits": ALGOS[n]["bits"], "warning": WARN.get(n)}
+                       for n in ALGOS}}
 
 
 # bi danh de khop nhieu cach dat ten trong app.py
 hash_all = compute_hashes = hash_text = hash_bytes = hash_data
 
 
-def avalanche(text, position=None) -> dict:
-    """Sua 1 ky tu (mac dinh ky tu cuoi), so sanh so bit khac nhau cua 3 ham bam."""
-    if not isinstance(text, str) or not text:
+def _to_text(x) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, (bytes, bytearray)):
+        return bytes(x).decode("utf-8", "replace")
+    return str(x)
+
+
+def avalanche(text, text2=None, position=None) -> dict:
+    """So sanh so bit khac nhau giua hash(text) va hash(text2).
+    text2 de trong/None -> tu tang ky tu tai `position` (mac dinh ky tu cuoi) len 1."""
+    text = _to_text(text)
+    text2 = _to_text(text2)
+    if not text:
         raise ValueError("Hay nhap van ban khong rong.")
-    pos = len(text) - 1 if position in (None, "") else int(position)
-    if not 0 <= pos < len(text):
-        raise ValueError("Vi tri ky tu ngoai pham vi.")
-    text2 = flip_one_char(text, pos)
+    if not text2:
+        pos = len(text) - 1 if position in (None, "") else int(position)
+        if not 0 <= pos < len(text):
+            raise ValueError("Vi tri ky tu ngoai pham vi.")
+        text2 = flip_one_char(text, pos)
     res = {}
     for name, info in ALGOS.items():
         h1 = hashlib.new(name, text.encode()).digest()
@@ -76,7 +89,11 @@ def avalanche(text, position=None) -> dict:
         res[name] = {"hash1": h1.hex(), "hash2": h2.hex(),
                      "diff_bits": d, "total_bits": info["bits"],
                      "ratio": round(d / info["bits"], 4)}
-    return {"original": text, "modified": text2, "position": pos, "result": res}
+    main = res["sha256"]
+    return {"original": text, "modified": text2, "text1": text, "text2": text2,
+            "hash1": main["hash1"], "hash2": main["hash2"],
+            "diff_bits": main["diff_bits"], "total_bits": main["total_bits"],
+            "ratio": main["ratio"], "result": res}
 
 
 def hmac_sha256(key, message, tag=None) -> dict:
