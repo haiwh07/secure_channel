@@ -70,6 +70,7 @@ def _to_text(x) -> str:
 
 
 def avalanche(text, text2=None, position=None) -> dict:
+    print("DEBUG avalanche args:", repr(text), repr(text2), repr(position), flush=True)
     """So sanh so bit khac nhau giua hash(text) va hash(text2).
     text2 de trong/None -> tu tang ky tu tai `position` (mac dinh ky tu cuoi) len 1."""
     text = _to_text(text)
