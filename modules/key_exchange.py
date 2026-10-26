@@ -1,93 +1,466 @@
+```python
 """
-Module 4: Thỏa thuận khóa (Diffie-Hellman số nhỏ, ECDH P-256, DH-2048) và HKDF-SHA256.
-Đáp ứng yêu cầu Phần B.2.5 của đề bài.
+hashing.py - Phan B.2.2: Ham bam, HMAC va hieu ung thac.
+
+Tich hop vao Flask app chung:
+    from modules.hashing import hash_bp
+    app.register_blueprint(hash_bp)
+
+Chay rieng:
+    python -m modules.hashing
+    -> http://127.0.0.1:5001/hash
 """
-import secrets
 
-from Crypto.Hash import SHA256
-from Crypto.Protocol.KDF import HKDF
-from Crypto.PublicKey import ECC
+import hashlib
+import hmac
+import os
+import statistics
+import time
 
+from flask import Blueprint, Flask, jsonify, request
 
-# --------------------------------------------------------------------------- #
-# DH-2048: nhóm MODP 2048-bit của RFC 3526 (Group 14), g = 2.
-# PyCryptodome không có DH số nguyên nên tự cài bằng pow().
-# p = 2^2048 - 2^1984 - 1 + 2^64 * ( floor(2^1918 * pi) + 124476 )
-# Tính trực tiếp từ công thức trong RFC để không phải chép tay 512 chữ số hex.
-# --------------------------------------------------------------------------- #
-def _atan_inv(x: int, one: int) -> int:
-    """arctan(1/x) dạng số nguyên cố định (nhân với `one`)."""
-    x2 = x * x
-    term = one // x
-    total = term
-    n, sign = 1, -1
-    while term:
-        term //= x2
-        n += 2
-        total += sign * (term // n)
-        sign = -sign
-    return total
+hash_bp = Blueprint("hash_bp", __name__)
 
+ALGOS = {
+    "sha256": {"bits": 256, "secure": True},
+    "sha1": {"bits": 160, "secure": False},
+    "md5": {"bits": 128, "secure": False},
+}
 
-def _pi_floor(bits: int, guard: int = 64) -> int:
-    """floor(2^bits * pi) bằng công thức Machin: pi = 16*atan(1/5) - 4*atan(1/239)."""
-    one = 1 << (bits + guard)
-    return (16 * _atan_inv(5, one) - 4 * _atan_inv(239, one)) >> guard
+WARN = {
+    "sha1": (
+        "SHA-1 da bi tim ra va cham (SHAttered, 2017) - "
+        "khong dung cho bao mat."
+    ),
+    "md5": (
+        "MD5 da bi pha vo (va cham tim duoc trong vai giay) - "
+        "khong dung cho bao mat."
+    ),
+}
 
 
-DH2048_P = (1 << 2048) - (1 << 1984) - 1 + (1 << 64) * (_pi_floor(1918) + 124476)
-DH2048_G = 2
-_P_LEN = 256  # 2048 bit = 256 byte
+# =========================================================
+# HAM TIEN ICH
+# =========================================================
+
+def bit_diff(a: bytes, b: bytes) -> int:
+    """Dem so bit khac nhau giua hai chuoi byte."""
+    if len(a) != len(b):
+        raise ValueError("Hai chuoi byte phai co cung do dai.")
+
+    return sum(bin(x ^ y).count("1") for x, y in zip(a, b))
 
 
-def _check_dh_public(y: int) -> None:
-    """Từ chối giá trị công khai nằm ngoài [2, p-2] (chống small-subgroup: y = 0, 1, p-1)."""
-    if not (2 <= y <= DH2048_P - 2):
-        raise ValueError("Giá trị DH công khai không hợp lệ")
+def digest_all(data: bytes) -> dict:
+    """Tinh SHA-256, SHA-1 va MD5."""
+    result = {}
+
+    for name, info in ALGOS.items():
+        result[name] = {
+            "hex": hashlib.new(name, data).hexdigest(),
+            "bits": info["bits"],
+            "warning": WARN.get(name),
+        }
+
+    return result
 
 
-def toy_dh(p: int, g: int, a: int, b: int) -> dict:
+def get_input_bytes() -> bytes:
+    """Lay du lieu tu file upload, JSON hoac form."""
+    file = request.files.get("file")
+
+    if file:
+        return file.read()
+
+    if request.is_json:
+        body = request.get_json(silent=True) or {}
+        return str(body.get("text", "")).encode("utf-8")
+
+    return request.form.get("text", "").encode("utf-8")
+
+
+def flip_one_char(text: str, pos: int) -> str:
+    """Thay doi mot ky tu tai vi tri pos."""
+    if not 0 <= pos < len(text):
+        raise ValueError("Vi tri ky tu ngoai pham vi.")
+
+    original = ord(text[pos])
+    changed = original + 1
+
+    if changed > 0x10FFFF or 0xD800 <= changed <= 0xDFFF:
+        changed = original - 1
+
+    return text[:pos] + chr(changed) + text[pos + 1:]
+
+
+# =========================================================
+# CAC HAM TUONG THICH VOI MODULE KHAC
+# =========================================================
+
+def avalanche(text: str, position: int | None = None) -> dict:
     """
-    Diffie-Hellman số nhỏ tự cài bằng pow() của Python.
-    Mẫu chuẩn: p=23, g=5, a=6, b=15 -> A=8, B=19, K=2.
+    Phan tich hieu ung thac.
+    Thay doi mot ky tu va so sanh cac ma bam truoc/sau.
     """
-    A = pow(g, a, p)
-    B = pow(g, b, p)
-    K_alice = pow(B, a, p)
-    K_bob = pow(A, b, p)
-    return {"A": A, "B": B, "K_alice": K_alice, "K_bob": K_bob}
+    if not text:
+        raise ValueError("Van ban khong duoc rong.")
+
+    if position is None:
+        position = len(text) - 1
+
+    if not 0 <= position < len(text):
+        raise ValueError("Vi tri ky tu ngoai pham vi.")
+
+    modified = flip_one_char(text, position)
+    result = {}
+
+    for name, info in ALGOS.items():
+        hash1 = hashlib.new(name, text.encode("utf-8")).digest()
+        hash2 = hashlib.new(name, modified.encode("utf-8")).digest()
+        diff = bit_diff(hash1, hash2)
+
+        result[name] = {
+            "hash1": hash1.hex(),
+            "hash2": hash2.hex(),
+            "diff_bits": diff,
+            "total_bits": info["bits"],
+            "ratio": round(diff / info["bits"], 4),
+        }
+
+    return {
+        "original": text,
+        "modified": modified,
+        "position": position,
+        "result": result,
+    }
 
 
-def generate_ephemeral(kind: str):
+def hmac_sha256(key: str | bytes, message: str | bytes) -> str:
+    """Tinh HMAC-SHA256 va tra ve chuoi hex."""
+    if isinstance(key, str):
+        key = key.encode("utf-8")
+
+    if isinstance(message, str):
+        message = message.encode("utf-8")
+
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
+def benchmark(data: bytes | str | None = None, repeat: int = 20) -> dict:
     """
-    Sinh cặp khóa tạm thời. Trả (private, public_bytes).
-    kind: "ecdh" hoặc "dh2048"
+    Do thoi gian bam SHA-256, SHA-1 va MD5.
+
+    Neu khong truyen data, tu tao 10 MiB du lieu ngau nhien.
     """
-    if kind == "ecdh":
-        priv = ECC.generate(curve="P-256")
-        return priv, priv.public_key().export_key(format="DER")
-    elif kind == "dh2048":
-        x = secrets.randbelow(DH2048_P - 3) + 2          # x trong [2, p-2]
-        y = pow(DH2048_G, x, DH2048_P)
-        return x, y.to_bytes(_P_LEN, "big")
-    raise ValueError(f"Loại thỏa thuận khóa không hỗ trợ: {kind}")
+    if data is None:
+        data = os.urandom(10 * 1024 * 1024)
+    elif isinstance(data, str):
+        data = data.encode("utf-8")
+
+    if len(data) < 10 * 1024 * 1024:
+        raise ValueError("Du lieu benchmark phai co it nhat 10 MiB.")
+
+    repeat = max(1, min(int(repeat), 100))
+    size_mb = len(data) / (1024 * 1024)
+    result = {}
+
+    for name in ALGOS:
+        times = []
+
+        for _ in range(repeat):
+            start = time.perf_counter()
+            hashlib.new(name, data).digest()
+            times.append((time.perf_counter() - start) * 1000)
+
+        mean_ms = statistics.mean(times)
+
+        result[name] = {
+            "mean_ms": round(mean_ms, 2),
+            "stdev_ms": round(statistics.pstdev(times), 2),
+            "throughput_mb_s": (
+                round(size_mb / (mean_ms / 1000), 1)
+                if mean_ms > 0 else 0
+            ),
+        }
+
+    return {
+        "size_mb": round(size_mb, 2),
+        "repeat": repeat,
+        "result": result,
+    }
 
 
-def derive_session_key(kind: str, my_private, peer_public_bytes: bytes,
-                       info: bytes = b"secure-channel-session") -> bytes:
-    """Dẫn xuất khóa phiên 32 byte từ bí mật chung qua HKDF-SHA256."""
-    if kind == "ecdh":
-        peer = ECC.import_key(peer_public_bytes)          # kiểm tra điểm nằm trên đường cong
-        if peer.curve != my_private.curve:
-            raise ValueError("Hai khóa khác đường cong")
-        shared_point = peer.pointQ * int(my_private.d)    # pointQ là thuộc tính, KHÔNG phải point()
-        shared_secret = int(shared_point.x).to_bytes(32, "big")
-    elif kind == "dh2048":
-        y = int.from_bytes(peer_public_bytes, "big")
-        _check_dh_public(y)
-        shared_secret = pow(y, my_private, DH2048_P).to_bytes(_P_LEN, "big")
-    else:
-        raise ValueError(f"Loại thỏa thuận khóa không hỗ trợ: {kind}")
+# =========================================================
+# API FLASK
+# =========================================================
 
-    return HKDF(master=shared_secret, key_len=32, salt=b"secure-channel-salt-fixed",
-                hashmod=SHA256, context=info)
+@hash_bp.post("/api/hash")
+def api_hash():
+    data = get_input_bytes()
+
+    return jsonify({
+        "length_bytes": len(data),
+        "hashes": digest_all(data),
+    })
+
+
+@hash_bp.post("/api/avalanche")
+def api_avalanche():
+    body = request.get_json(silent=True) or {}
+    text = body.get("text", "")
+
+    if not isinstance(text, str) or not text:
+        return jsonify({"error": "Hay nhap van ban khong rong."}), 400
+
+    try:
+        position = int(body.get("position", len(text) - 1))
+        result = avalanche(text, position)
+    except (ValueError, TypeError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    return jsonify(result)
+
+
+@hash_bp.post("/api/hmac")
+def api_hmac():
+    body = request.get_json(silent=True) or {}
+
+    key = body.get("key", "")
+    message = body.get("message", "")
+
+    if not isinstance(key, str) or not isinstance(message, str):
+        return jsonify({
+            "error": "Key va message phai la chuoi."
+        }), 400
+
+    tag = hmac_sha256(key, message)
+    output = {"tag": tag}
+
+    given_tag = body.get("tag")
+
+    if given_tag is not None:
+        if not isinstance(given_tag, str):
+            return jsonify({"error": "Tag phai la chuoi."}), 400
+
+        valid = hmac.compare_digest(
+            tag.encode("ascii"),
+            given_tag.strip().lower().encode("ascii", errors="ignore"),
+        )
+
+        output["verify"] = {
+            "valid": valid,
+            "message": (
+                "The hop le" if valid
+                else "The khong hop le (sai khoa hoac thong diep bi sua)"
+            ),
+        }
+
+    return jsonify(output)
+
+
+@hash_bp.post("/api/hash-benchmark")
+def api_benchmark():
+    """Benchmark file upload hoac du lieu ngau nhien 10 MiB."""
+    file = request.files.get("file")
+    data = file.read() if file else None
+
+    try:
+        repeat = int(request.form.get("repeat", 20))
+        result = benchmark(data, repeat)
+    except (ValueError, TypeError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    return jsonify(result)
+
+
+# =========================================================
+# GIAO DIEN WEB
+# =========================================================
+
+PAGE = """<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hàm băm &amp; HMAC</title>
+<style>
+body {
+    font-family: sans-serif;
+    max-width: 900px;
+    margin: 20px auto;
+    padding: 0 14px;
+}
+textarea, input {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 5px 0;
+    padding: 8px;
+}
+button {
+    padding: 8px 14px;
+    margin: 5px 0;
+    cursor: pointer;
+}
+pre {
+    background: #f4f4f4;
+    padding: 10px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+section {
+    border: 1px solid #ccc;
+    padding: 12px;
+    margin: 14px 0;
+    border-radius: 8px;
+}
+</style>
+</head>
+<body>
+<h2>B.2.2 - Hàm băm, HMAC, hiệu ứng thác</h2>
+
+<section>
+<h3>1. Băm văn bản / file</h3>
+<textarea id="t" rows="3">abc</textarea>
+<input type="file" id="f">
+<button onclick="doHash()">Tính mã băm</button>
+<pre id="o1"></pre>
+</section>
+
+<section>
+<h3>2. Hiệu ứng thác</h3>
+<input id="pos" type="number" placeholder="Vị trí ký tự (mặc định: ký tự cuối)">
+<button onclick="doAv()">Sửa một ký tự và so sánh</button>
+<pre id="o2"></pre>
+</section>
+
+<section>
+<h3>3. HMAC-SHA256</h3>
+<label>Khóa</label>
+<input id="k" value="key">
+<label>Thông điệp</label>
+<input id="m" value="The quick brown fox jumps over the lazy dog">
+<label>Tag cần kiểm tra (không bắt buộc)</label>
+<input id="tg" placeholder="Nhập tag HMAC cần xác minh">
+<button onclick="doH()">Tính / kiểm tra HMAC</button>
+<pre id="o3"></pre>
+</section>
+
+<section>
+<h3>4. Benchmark file từ 10 MiB</h3>
+<input type="file" id="bf">
+<label>Số lần lặp</label>
+<input type="number" id="repeat" value="20" min="1" max="100">
+<button onclick="doB()">Đo thời gian băm</button>
+<pre id="o4"></pre>
+</section>
+
+<script>
+async function postJSON(url, body) {
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)
+    });
+    return response.json();
+}
+
+async function doHash() {
+    const fd = new FormData();
+    const file = document.getElementById('f').files[0];
+
+    if (file) {
+        fd.append('file', file);
+    } else {
+        fd.append('text', document.getElementById('t').value);
+    }
+
+    const r = await fetch('/api/hash', {
+        method: 'POST',
+        body: fd
+    }).then(response => response.json());
+
+    document.getElementById('o1').textContent = r.error ||
+        Object.entries(r.hashes || {}).map(([name, value]) =>
+            name.toUpperCase() + ': ' + value.hex +
+            (value.warning ? '\\\\n! ' + value.warning : '')
+        ).join('\\\\n');
+}
+
+async function doAv() {
+    const text = document.getElementById('t').value;
+    const rawPosition = document.getElementById('pos').value;
+    const body = {text};
+
+    if (rawPosition !== '') {
+        body.position = Number(rawPosition);
+    }
+
+    const r = await postJSON('/api/avalanche', body);
+
+    document.getElementById('o2').textContent = r.error ||
+        'Gốc: ' + r.original + ' -> Sửa: ' + r.modified + '\\\\n' +
+        Object.entries(r.result).map(([name, value]) =>
+            name.toUpperCase() + ': khác ' + value.diff_bits + '/' +
+            value.total_bits + ' bit (' +
+            (value.ratio * 100).toFixed(1) + '%)'
+        ).join('\\\\n');
+}
+
+async function doH() {
+    const body = {
+        key: document.getElementById('k').value,
+        message: document.getElementById('m').value
+    };
+    const givenTag = document.getElementById('tg').value;
+
+    if (givenTag) {
+        body.tag = givenTag;
+    }
+
+    const r = await postJSON('/api/hmac', body);
+
+    document.getElementById('o3').textContent = r.error ||
+        'Tag: ' + r.tag +
+        (r.verify ? '\\\\n' + r.verify.message : '');
+}
+
+async function doB() {
+    const fd = new FormData();
+    const file = document.getElementById('bf').files[0];
+    const repeat = document.getElementById('repeat').value;
+
+    if (file) {
+        fd.append('file', file);
+    }
+
+    fd.append('repeat', repeat);
+
+    const r = await fetch('/api/hash-benchmark', {
+        method: 'POST',
+        body: fd
+    }).then(response => response.json());
+
+    document.getElementById('o4').textContent = r.error ||
+        'Kích thước: ' + r.size_mb + ' MiB; số lần lặp: ' + r.repeat +
+        '\\\\n' + Object.entries(r.result).map(([name, value]) =>
+            name.toUpperCase() + ': ' + value.mean_ms +
+            ' ms (+/- ' + value.stdev_ms + ' ms), ' +
+            value.throughput_mb_s + ' MiB/s'
+        ).join('\\\\n');
+}
+</script>
+</body>
+</html>"""
+
+
+@hash_bp.get("/hash")
+def page():
+    return PAGE
+
+
+if __name__ == "__main__":
+    app = Flask(__name__)
+    app.register_blueprint(hash_bp)
+    app.run(host="127.0.0.1", port=5001, debug=True)
+```
